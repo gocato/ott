@@ -24,6 +24,15 @@ from typing import (
         Tuple,
         Type,
         Union,
+        Any,
+        Callable,
+        Dict,
+        Literal,
+        Mapping,
+        Optional,
+        Tuple,
+        Type,
+        Union,
 )
 
 import orbax.checkpoint
@@ -46,6 +55,9 @@ from ott import utils
 from ott.geometry import costs
 from ott.neural.flows.flows import BaseFlow
 from ott.neural.models.base_solver import (
+        BaseNeuralSolver,
+        ResampleMixin,
+        UnbalancednessMixin,
         BaseNeuralSolver,
         ResampleMixin,
         UnbalancednessMixin,
