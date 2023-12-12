@@ -24,15 +24,6 @@ from typing import (
         Tuple,
         Type,
         Union,
-        Any,
-        Callable,
-        Dict,
-        Literal,
-        Mapping,
-        Optional,
-        Tuple,
-        Type,
-        Union,
 )
 
 import orbax.checkpoint
@@ -58,9 +49,6 @@ from ott.neural.models.base_solver import (
         BaseNeuralSolver,
         ResampleMixin,
         UnbalancednessMixin,
-        BaseNeuralSolver,
-        ResampleMixin,
-        UnbalancednessMixin,
 )
 from ott.solvers import was_solver
 
@@ -69,10 +57,47 @@ __all__ = ["OTFlowMatching"]
 
 class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
     """(Optimal transport) flow matching class.
+    """(Optimal transport) flow matching class.
 
     Flow matching as introduced in :cite:`lipman:22`, with extension to OT-FM
     (:cite`tong:23`, :cite:`pooladian:23`).
+    Flow matching as introduced in :cite:`lipman:22`, with extension to OT-FM
+    (:cite`tong:23`, :cite:`pooladian:23`).
 
+    Args:
+        velocity_field: Neural vector field parameterized by a neural network.
+        input_dim: Dimension of the input data.
+        cond_dim: Dimension of the conditioning variable.
+        iterations: Number of iterations.
+        valid_freq: Frequency of validation.
+        ot_solver: OT solver to match samples from the source and the target
+            distribution as proposed in :cite:`tong:23`, :cite:`pooladian:23`.
+            If :obj:`None`, no matching will be performed as proposed in
+            :cite:`lipman:22`.
+        flow: Flow between source and target distribution.
+        time_sampler: Sampler for the time.
+        optimizer: Optimizer for `velocity_field`.
+        checkpoint_manager: Checkpoint manager.
+        epsilon: Entropy regularization term of the OT OT problem solved by the
+            `ot_solver`.
+        cost_fn: Cost function for the OT problem solved by the `ot_solver`.
+        scale_cost: How to scale the cost matrix for the OT problem solved by the
+            `ot_solver`.
+        tau_a: If :math:`<1`, defines how much unbalanced the problem is
+            on the first marginal.
+        tau_b: If :math:`< 1`, defines how much unbalanced the problem is
+            on the second marginal.
+        rescaling_a: Neural network to learn the left rescaling function as
+            suggested in :cite:`eyring:23`. If :obj:`None`, the left rescaling factor
+            is not learnt.
+        rescaling_b: Neural network to learn the right rescaling function as
+            suggested in :cite:`eyring:23`. If :obj:`None`, the right rescaling factor
+            is not learnt.
+        unbalanced_kwargs: Keyword arguments for the unbalancedness solver.
+        callback_fn: Callback function.
+        num_eval_samples: Number of samples to evaluate on during evaluation.
+        rng: Random number generator.
+    """
     Args:
         velocity_field: Neural vector field parameterized by a neural network.
         input_dim: Dimension of the input data.
