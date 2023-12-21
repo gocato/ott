@@ -301,7 +301,7 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                         state_eta=self.state_eta,
                         state_xi=self.state_xi,
                 )
-            if step % self.valid_freq == 0:
+            if step % self.valid_freq == 0 and step != 0:
                 self._valid_step(valid_loader, step)
                 if self.checkpoint_manager is not None:
                     states_to_save = {
@@ -383,25 +383,22 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             lambda x: next(x),
             valid_loader.dataloaders
         )
-        
-        if jax.device_count() > 1:
-            parallelizer = jax.pmap
-        else:
-            parallelizer = jax.vmap
-        
+
+        parallelizer = jax.pmap if jax.device_count() > 1 else jax.vmap
+
         if self.tensorboard_dir is not None and self.metrics_callback is not None:
                 torch_writer = SummaryWriter(self.tensorboard_dir)
                 sources = jnp.asarray([
                     batches[condition]["source_lin"]
-                    for condition in batches.keys()
+                    for condition in batches
                 ])
                 targets = jnp.asarray([
                     batches[condition]["target_lin"]
-                    for condition in batches.keys()
+                    for condition in batches
                 ])
                 conditions = jnp.asarray([
                     batches[condition]["source_conditions"]
-                    for condition in batches.keys()
+                    for condition in batches
                 ])
                 names = list(batches.keys())
                 predictions = parallelizer(
@@ -411,7 +408,7 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                         forward=True,
                     )
                 )(sources, conditions)
-                
+
                 metrics = parallelizer(
                     lambda source, target, pred: self.metrics_callback(
                         source,
@@ -420,7 +417,7 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                         **self._metrics_callback_kwargs,
                     )
                 )(sources, targets, predictions)
-                
+
                 for group_id, name in enumerate(batches.keys()):
                     metrics_condition = jax.tree_util.tree_map(
                         lambda x: x[group_id],
@@ -428,15 +425,15 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                     )
                     metrics_condition_np = {
                         key: np.asarray(value) for key, value in metrics_condition.items()
-                        if not isinstance(value, str) and not value is None
+                        if not isinstance(value, str) and value is not None
                     }
                     torch_writer.add_scalars(
-                        "Metrics/condition_{}".format(name),
+                        f"Metrics/condition_{name}",
                         metrics_condition_np,
                         step,
                     )
                     torch_writer.flush()
-                    
+
                 if self.plot_callback is not None:
                     for source, target, pred, name in zip(sources, targets, predictions, names):
                         fig = self.plot_callback(
@@ -445,7 +442,7 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                                 pred,
                                 **self._plot_callback_kwargs,
                             )
-        
+
                         fig.set_tight_layout(True)
                         torch_writer.add_figure(
                                 f"Plots/{name}",

@@ -17,13 +17,12 @@ from typing import Any, Callable, Dict, Literal, Optional, Type, Union
 
 import jax
 import jax.numpy as jnp
-
 import diffrax
 import optax
 from flax.training import train_state
+from flax.training.early_stopping import EarlyStopping
 from flax.training.train_state import TrainState
 from orbax import checkpoint
-
 from ott import utils
 from ott.geometry import costs
 from ott.neural.flows.flows import BaseFlow, ConstantNoiseFlow
@@ -36,6 +35,11 @@ from ott.neural.models.base_solver import (
 from ott.solvers import was_solver
 from ott.solvers.linear import sinkhorn
 from ott.solvers.quadratic import gromov_wasserstein
+
+from torch.utils.tensorboard import SummaryWriter
+import numpy as np
+import optuna
+from tqdm import trange
 
 __all__ = ["GENOT"]
 
@@ -129,6 +133,13 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
       callback_fn: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray],
                                      Any]] = None,
       rng: Optional[jax.Array] = None,
+      tensorboard_dir: Optional[str] = None,
+      optuna_dir: Optional[str] = None,
+      metrics_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
+      metrics_callback_kwargs: Optional[Dict[str, Any]] = types.MappingProxyType({}),
+      plot_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
+      plot_callback_kwargs: Optional[Dict[str, Any]] = types.MappingProxyType({}),
+      early_stopping_kwargs: Optional[EarlyStopping] = None,
   ):
     rng = utils.default_prng_key(rng)
     rng, rng_unbalanced = jax.random.split(rng)
@@ -189,6 +200,17 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
     self.callback_fn = callback_fn
     self.setup()
 
+    self.tensorboard_dir = tensorboard_dir
+    self.optuna_dir = optuna_dir
+    self.metrics_callback = metrics_callback
+    self._metrics_callback_kwargs = metrics_callback_kwargs
+    self.plot_callback = plot_callback
+    self._plot_callback_kwargs = plot_callback_kwargs
+    self.early_stopping_kwargs = early_stopping_kwargs
+    if self.early_stopping_kwargs is not None:
+      self.early_stopping = EarlyStopping(
+          **self.early_stopping_kwargs
+      )
   def setup(self):
     """Set up the model.
 
@@ -230,7 +252,8 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
   def __call__(self, train_loader, valid_loader):
     """Train GENOT."""
     batch: Dict[str, jnp.array] = {}
-    for iteration in range(self.iterations):
+    tbar = trange(self.iterations, leave=True)
+    for iteration in tbar:
       batch = next(train_loader)
 
       (
@@ -304,6 +327,7 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
       self.state_velocity_field, loss = self.step_fn(
           rng_step_fn, self.state_velocity_field, batch
       )
+      tbar.set_postfix({"loss": loss}, refresh=True)
       if self.learn_rescaling:
         (
             self.state_eta, self.state_xi, eta_predictions, xi_predictions,
@@ -317,7 +341,7 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             state_eta=self.state_eta,
             state_xi=self.state_xi,
         )
-      if iteration % self.valid_freq == 0:
+      if iteration % self.valid_freq == 0 and iteration != 0:
         self._valid_step(valid_loader, iteration)
         if self.checkpoint_manager is not None:
           states_to_save = {"state_velocity_field": self.state_velocity_field}
@@ -347,12 +371,15 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             state_velocity_field.apply_fn, {"params": params}
         )
 
-        cond_input = jnp.concatenate([
+        cond_input = jnp.concatenate(
+          [
             batch[el]
             for el in ["source", "source_conditions"]
             if batch[el] is not None
-        ],
-                                     axis=1)
+          ],
+          axis=1
+        )
+
         v_t = jax.vmap(apply_fn
                       )(t=batch["time"], x=x_t, condition=cond_input, rng=rng)
         u_t = self.flow.compute_ut(
@@ -431,10 +458,85 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
 
     return jax.vmap(solve_ode)(latent_batch, cond_input)
 
-  def _valid_step(self, valid_loader, iter):
-    """TODO."""
-    next(valid_loader)
+  def _valid_step(self, valid_loader, step):
+    batches = jax.tree_util.tree_map(
+        lambda x: next(x),
+        valid_loader.dataloaders
+    )
 
+    parallelizer = jax.pmap if jax.device_count() > 1 else jax.vmap
+
+    if self.tensorboard_dir is not None and self.metrics_callback is not None:
+      torch_writer = SummaryWriter(self.tensorboard_dir)
+      sources = jnp.asarray([
+          batches[condition]["source_lin"]
+          for condition in batches
+      ])
+      targets = jnp.asarray([
+          batches[condition]["target_lin"]
+          for condition in batches
+      ])
+      conditions = jnp.asarray([
+          batches[condition]["source_conditions"]
+          for condition in batches
+      ])
+      names = list(batches.keys())
+      predictions = parallelizer(
+          lambda source, condition: self.transport(
+              source,
+              condition,
+              forward=True,
+          )
+      )(sources, conditions)
+
+      metrics = parallelizer(
+          lambda source, target, pred: self.metrics_callback(
+              source,
+              target,
+              pred,
+              **self._metrics_callback_kwargs,
+          )
+      )(sources, targets, predictions)
+
+      for group_id, name in enumerate(batches.keys()):
+          metrics_condition = jax.tree_util.tree_map(
+              lambda x: x[group_id],
+              metrics
+          )
+          metrics_condition_np = {
+              key: np.asarray(value) for key, value in metrics_condition.items()
+              if not isinstance(value, str) and value is not None
+          }
+          torch_writer.add_scalars(
+              f"Metrics/condition_{name}",
+              metrics_condition_np,
+              step,
+          )
+          torch_writer.flush()
+
+      if self.plot_callback is not None:
+          for source, target, pred, name in zip(sources, targets, predictions, names):
+              fig = self.plot_callback(
+                      source,
+                      target,
+                      pred,
+                      **self._plot_callback_kwargs,
+                  )
+
+              fig.set_tight_layout(True)
+              torch_writer.add_figure(
+                      f"Plots/{name}",
+                      fig,
+                      step,
+              )
+
+      torch_writer.close()
+
+  def _report_trial(self, metric, epoch_id) -> None:
+    """Report the trial results to Optuna."""
+    self.trial.report(metric, step=epoch_id)
+    if self.trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
   @property
   def learn_rescaling(self) -> bool:
     """Whether to learn at least one rescaling factor."""
