@@ -71,7 +71,7 @@ class OTDataLoader:
     self.target_quad = target_quad
     self.source_conditions = source_conditions
     self.target_conditions = target_conditions
-    self.batch_size = batch_size
+    self.batch_size = batch_size if batch_size is not None else self.n_target
     self.rng = np.random.default_rng(seed=seed)
 
   def __next__(self) -> Mapping[str, np.ndarray]:

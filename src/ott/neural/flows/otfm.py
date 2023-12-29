@@ -29,7 +29,7 @@ from typing import (
 import orbax.checkpoint
 from flax.training import orbax_utils
 from pathlib import Path
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 import optuna
 import numpy as np
 from flax.training.early_stopping import EarlyStopping
@@ -126,7 +126,7 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             valid_freq: int = 5000,
             num_eval_samples: int = 1000,
             rng: Optional[jax.Array] = None,
-            tensorboard_dir: Optional[str] = None,
+            log_training: Optional[str] = None,
             optuna_dir: Optional[str] = None,
             metrics_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
             metrics_callback_kwargs: Optional[Dict[str, Any]] = types.MappingProxyType({}),
@@ -168,7 +168,7 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
         self.logging_freq = logging_freq
         self.num_eval_samples = num_eval_samples
         self._training_logs: Mapping[str, Any] = defaultdict(list)
-        self.tensorboard_dir = tensorboard_dir
+        self.log_training = log_training
         self.optuna_dir = optuna_dir
         self.metrics_callback = metrics_callback
         self._metrics_callback_kwargs = metrics_callback_kwargs
@@ -273,14 +273,11 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                 self._training_logs["loss"].append(curr_loss / self.logging_freq)
                 if self.optuna_dir is not None:
                         self._report_trial(curr_loss, step)
-                if self.tensorboard_dir is not None:
-                    torch_writer = SummaryWriter(self.tensorboard_dir)
-                    torch_writer.add_scalar(
-                            f"Loss/avg_loss_{self.logging_freq}_steps",
-                            np.asarray(curr_loss / self.logging_freq),
+                if self.log_training:
+                    wandb.log(
+                            {f"Loss/avg_loss_{self.logging_freq}_steps": curr_loss / self.logging_freq},
                             step
                     )
-                    torch_writer.flush()
                 tbar.set_postfix(
                     loss=curr_loss/self.logging_freq,
                     refresh=False
@@ -385,73 +382,66 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
         )
 
         parallelizer = jax.pmap if jax.device_count() > 1 else jax.vmap
+        sources = jnp.asarray([
+            batches[condition]["source_lin"]
+            for condition in batches
+        ])
+        targets = jnp.asarray([
+            batches[condition]["target_lin"]
+            for condition in batches
+        ])
+        conditions = jnp.asarray([
+            batches[condition]["source_conditions"]
+            for condition in batches
+        ])
+        names = list(batches.keys())
+        predictions = parallelizer(
+            lambda source, condition: self.transport(
+                source,
+                condition,
+                forward=True,
+            )
+        )(sources, conditions)
 
-        if self.tensorboard_dir is not None and self.metrics_callback is not None:
-                torch_writer = SummaryWriter(self.tensorboard_dir)
-                sources = jnp.asarray([
-                    batches[condition]["source_lin"]
-                    for condition in batches
-                ])
-                targets = jnp.asarray([
-                    batches[condition]["target_lin"]
-                    for condition in batches
-                ])
-                conditions = jnp.asarray([
-                    batches[condition]["source_conditions"]
-                    for condition in batches
-                ])
-                names = list(batches.keys())
-                predictions = parallelizer(
-                    lambda source, condition: self.transport(
-                        source,
-                        condition,
-                        forward=True,
-                    )
-                )(sources, conditions)
+        metrics = parallelizer(
+            lambda source, target, pred: self.metrics_callback(
+                source,
+                target,
+                pred,
+                **self._metrics_callback_kwargs,
+            )
+        )(sources, targets, predictions)
 
-                metrics = parallelizer(
-                    lambda source, target, pred: self.metrics_callback(
+        for group_id, name in enumerate(batches.keys()):
+            metrics_condition = jax.tree_util.tree_map(
+                lambda x: x[group_id],
+                metrics
+            )
+            metrics_condition_np = {
+                key: np.asarray(value) for key, value in metrics_condition.items()
+                if not isinstance(value, str) and value is not None
+            }
+            wandb.log(
+                {
+                    f"Metrics/condition_{name}": metrics_condition_np
+                },
+                step,
+            )
+
+        if self.plot_callback is not None:
+            for source, target, pred, name in zip(sources, targets, predictions, names):
+                fig = self.plot_callback(
                         source,
                         target,
                         pred,
-                        **self._metrics_callback_kwargs,
+                        **self._plot_callback_kwargs,
                     )
-                )(sources, targets, predictions)
 
-                for group_id, name in enumerate(batches.keys()):
-                    metrics_condition = jax.tree_util.tree_map(
-                        lambda x: x[group_id],
-                        metrics
-                    )
-                    metrics_condition_np = {
-                        key: np.asarray(value) for key, value in metrics_condition.items()
-                        if not isinstance(value, str) and value is not None
-                    }
-                    torch_writer.add_scalars(
-                        f"Metrics/condition_{name}",
-                        metrics_condition_np,
+                fig.set_tight_layout(True)
+                wandb.log(
+                        {f"Plots/{name}": fig},
                         step,
-                    )
-                    torch_writer.flush()
-
-                if self.plot_callback is not None:
-                    for source, target, pred, name in zip(sources, targets, predictions, names):
-                        fig = self.plot_callback(
-                                source,
-                                target,
-                                pred,
-                                **self._plot_callback_kwargs,
-                            )
-
-                        fig.set_tight_layout(True)
-                        torch_writer.add_figure(
-                                f"Plots/{name}",
-                                fig,
-                                step,
-                        )
-
-                torch_writer.close()
-
+                )
 
     def _report_trial(self, metric, epoch_id) -> None:
         """Report the trial results to Optuna."""
