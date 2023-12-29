@@ -14,12 +14,15 @@
 import functools
 import types
 from typing import Any, Callable, Dict, Literal, Optional, Type, Union
-
+import wandb
 import jax
 import jax.numpy as jnp
 import diffrax
 import optax
 from flax.training import train_state
+from flax.training import orbax_utils
+import orbax
+from pathlib import Path
 from flax.training.early_stopping import EarlyStopping
 from flax.training.train_state import TrainState
 from orbax import checkpoint
@@ -36,7 +39,6 @@ from ott.solvers import was_solver
 from ott.solvers.linear import sinkhorn
 from ott.solvers.quadratic import gromov_wasserstein
 
-from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import optuna
 from tqdm import trange
@@ -133,13 +135,13 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
       callback_fn: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray],
                                      Any]] = None,
       rng: Optional[jax.Array] = None,
-      tensorboard_dir: Optional[str] = None,
       optuna_dir: Optional[str] = None,
       metrics_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
       metrics_callback_kwargs: Optional[Dict[str, Any]] = types.MappingProxyType({}),
       plot_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
       plot_callback_kwargs: Optional[Dict[str, Any]] = types.MappingProxyType({}),
       early_stopping_kwargs: Optional[EarlyStopping] = None,
+      log_training: bool = False,
   ):
     rng = utils.default_prng_key(rng)
     rng, rng_unbalanced = jax.random.split(rng)
@@ -200,7 +202,6 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
     self.callback_fn = callback_fn
     self.setup()
 
-    self.tensorboard_dir = tensorboard_dir
     self.optuna_dir = optuna_dir
     self.metrics_callback = metrics_callback
     self._metrics_callback_kwargs = metrics_callback_kwargs
@@ -211,6 +212,7 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
       self.early_stopping = EarlyStopping(
           **self.early_stopping_kwargs
       )
+    self.log_training = log_training
   def setup(self):
     """Set up the model.
 
@@ -458,6 +460,43 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
 
     return jax.vmap(solve_ode)(latent_batch, cond_input)
 
+
+  def transport_with_mean(
+      self,
+      source: jnp.ndarray,
+      condition: Optional[jnp.ndarray] = None,
+      rng: Optional[jax.Array] = None,
+      forward: bool = True,
+      diffeqsolve_kwargs: Dict[str, Any] = types.MappingProxyType({}),
+      repetitions: int = 30,
+  ) -> Union[jnp.array, diffrax.Solution, Optional[jnp.ndarray]]:
+    """Return the prediction as a mean of predictions."""
+    if jax.local_device_count() > 1:
+      parallel_transport = jax.pmap(
+        jax.tree_util.Partial(
+          self.transport,
+          source=source,
+          condition=condition,
+          forward=forward,
+          diffeqsolve_kwargs=diffeqsolve_kwargs,
+        )
+      )
+    else:
+      parallel_transport = jax.vmap(
+        jax.tree_util.Partial(
+          self.transport,
+          source=source,
+          condition=condition,
+          forward=forward,
+          diffeqsolve_kwargs=diffeqsolve_kwargs,
+        )
+      )
+
+    rngs = jax.random.split(utils.default_prng_key(rng), repetitions)
+    predictions = parallel_transport(rng=rngs)
+
+    return jnp.mean(predictions, axis=0)
+
   def _valid_step(self, valid_loader, step):
     batches = jax.tree_util.tree_map(
         lambda x: next(x),
@@ -466,71 +505,62 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
 
     parallelizer = jax.pmap if jax.device_count() > 1 else jax.vmap
 
-    if self.tensorboard_dir is not None and self.metrics_callback is not None:
-      torch_writer = SummaryWriter(self.tensorboard_dir)
-      sources = jnp.asarray([
-          batches[condition]["source_lin"]
-          for condition in batches
-      ])
-      targets = jnp.asarray([
-          batches[condition]["target_lin"]
-          for condition in batches
-      ])
-      conditions = jnp.asarray([
-          batches[condition]["source_conditions"]
-          for condition in batches
-      ])
-      names = list(batches.keys())
-      predictions = parallelizer(
-          lambda source, condition: self.transport(
-              source,
-              condition,
-              forward=True,
-          )
-      )(sources, conditions)
+    sources = jnp.asarray([
+        batches[condition]["source_lin"]
+        for condition in batches
+    ])
+    targets = jnp.asarray([
+        batches[condition]["target_lin"]
+        for condition in batches
+    ])
+    conditions = jnp.asarray([
+        batches[condition]["source_conditions"]
+        for condition in batches
+    ])
+    names = list(batches.keys())
+    predictions = parallelizer(
+        lambda source, condition: self.transport_with_mean(
+            source,
+            condition,
+            forward=True,
+        )
+    )(sources, conditions)
 
-      metrics = parallelizer(
-          lambda source, target, pred: self.metrics_callback(
-              source,
-              target,
-              pred,
-              **self._metrics_callback_kwargs,
-          )
-      )(sources, targets, predictions)
+    metrics = parallelizer(
+        lambda source, target, pred: self.metrics_callback(
+            source,
+            target,
+            pred,
+            **self._metrics_callback_kwargs,
+        )
+    )(sources, targets, predictions)
 
-      for group_id, name in enumerate(batches.keys()):
-          metrics_condition = jax.tree_util.tree_map(
-              lambda x: x[group_id],
-              metrics
-          )
-          metrics_condition_np = {
-              key: np.asarray(value) for key, value in metrics_condition.items()
-              if not isinstance(value, str) and value is not None
-          }
-          torch_writer.add_scalars(
-              f"Metrics/condition_{name}",
-              metrics_condition_np,
-              step,
-          )
-          torch_writer.flush()
+    for group_id, name in enumerate(batches.keys()):
+        metrics_condition = jax.tree_util.tree_map(
+            lambda x: x[group_id],
+            metrics
+        )
+        metrics_condition_np = {
+            key: np.asarray(value) for key, value in metrics_condition.items()
+            if not isinstance(value, str) and value is not None
+        }
+        wandb.log(
+            {f"Metrics/condition_{name}": metrics_condition_np},
+            step,
+        )
 
-      if self.plot_callback is not None:
-          for source, target, pred, name in zip(sources, targets, predictions, names):
-              fig = self.plot_callback(
-                      source,
-                      target,
-                      pred,
-                      **self._plot_callback_kwargs,
-                  )
+    if self.plot_callback is not None:
+        for source, target, pred, name in zip(sources, targets, predictions, names):
+            fig = self.plot_callback(
+                    source,
+                    target,
+                    pred,
+                    **self._plot_callback_kwargs,
+                )
 
-              fig.set_tight_layout(True)
-              torch_writer.add_figure(
-                      f"Plots/{name}",
-                      fig,
-                      step,
-              )
+            fig.set_tight_layout(True)
+            wandb.log({f"Plots/condition_{name}": wandb.Image(fig)})
 
-      torch_writer.close()
 
   def _report_trial(self, metric, epoch_id) -> None:
     """Report the trial results to Optuna."""
@@ -542,13 +572,24 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
     """Whether to learn at least one rescaling factor."""
     return self.rescaling_a is not None or self.rescaling_b is not None
 
-  def save(self, path: str):
-    """Save the model.
-
-    Args:
-      path: Where to save the model to.
-    """
     raise NotImplementedError
+
+  def save(self, path: str):
+      """Save the model.
+
+      Args:
+          path: Where to save the model to.
+      """
+      checkpoint = {
+          "velocity_field_state": self.state_velocity_field,
+      }
+      orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+      save_args = orbax_utils.save_args_from_target(checkpoint)
+      orbax_checkpointer.save(
+              Path(path, "checkpoints"),
+              checkpoint,
+              save_args=save_args
+      )
 
   def load(self, path: str) -> "GENOT":
     """Load a model.
