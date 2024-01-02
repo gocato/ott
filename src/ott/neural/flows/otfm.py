@@ -30,7 +30,6 @@ import orbax.checkpoint
 from flax.training import orbax_utils
 from pathlib import Path
 import wandb
-import optuna
 import numpy as np
 from flax.training.early_stopping import EarlyStopping
 from tqdm import trange
@@ -127,7 +126,6 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             num_eval_samples: int = 1000,
             rng: Optional[jax.Array] = None,
             log_training: Optional[str] = None,
-            optuna_dir: Optional[str] = None,
             metrics_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
             metrics_callback_kwargs: Optional[Dict[str, Any]] = types.MappingProxyType({}),
             plot_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
@@ -169,7 +167,6 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
         self.num_eval_samples = num_eval_samples
         self._training_logs: Mapping[str, Any] = defaultdict(list)
         self.log_training = log_training
-        self.optuna_dir = optuna_dir
         self.metrics_callback = metrics_callback
         self._metrics_callback_kwargs = metrics_callback_kwargs
         self.plot_callback = plot_callback
@@ -273,8 +270,6 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                 self._training_logs["loss"].append(
                     curr_loss / self.logging_freq
                 )
-                if self.optuna_dir is not None:
-                        self._report_trial(curr_loss, step)
                 if self.log_training:
                     wandb.log(
                             {
@@ -447,13 +442,7 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                         {f"Plots/{name}": fig},
                         step,
                 )
-
-    def _report_trial(self, metric, epoch_id) -> None:
-        """Report the trial results to Optuna."""
-        self.trial.report(metric, step=epoch_id)
-        if self.trial.should_prune():
-                raise optuna.exceptions.TrialPruned()
-
+                
     @property
     def learn_rescaling(self) -> bool:
         """Whether to learn at least one rescaling factor."""
