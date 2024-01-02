@@ -270,12 +270,17 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             # We are computing an average loss over the logging frequency
             curr_loss += loss
             if step % self.logging_freq == 0:
-                self._training_logs["loss"].append(curr_loss / self.logging_freq)
+                self._training_logs["loss"].append(
+                    curr_loss / self.logging_freq
+                )
                 if self.optuna_dir is not None:
                         self._report_trial(curr_loss, step)
                 if self.log_training:
                     wandb.log(
-                            {f"Loss/avg_loss_{self.logging_freq}_steps": curr_loss / self.logging_freq},
+                            {
+                                f"Loss/avg_loss_{self.logging_freq}_steps":
+                                curr_loss / self.logging_freq
+                            },
                             step
                     )
                 tbar.set_postfix(
