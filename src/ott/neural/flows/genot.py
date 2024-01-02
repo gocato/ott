@@ -40,7 +40,6 @@ from ott.solvers.linear import sinkhorn
 from ott.solvers.quadratic import gromov_wasserstein
 
 import numpy as np
-import optuna
 from tqdm import trange
 
 __all__ = ["GENOT"]
@@ -135,7 +134,6 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
       callback_fn: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray],
                                      Any]] = None,
       rng: Optional[jax.Array] = None,
-      optuna_dir: Optional[str] = None,
       metrics_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
       metrics_callback_kwargs: Optional[Dict[str, Any]] = types.MappingProxyType({}),
       plot_callback: Optional[Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], Any]] = None,
@@ -202,7 +200,6 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
     self.callback_fn = callback_fn
     self.setup()
 
-    self.optuna_dir = optuna_dir
     self.metrics_callback = metrics_callback
     self._metrics_callback_kwargs = metrics_callback_kwargs
     self.plot_callback = plot_callback
@@ -571,12 +568,6 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             fig.set_tight_layout(True)
             wandb.log({f"Plots/condition_{name}": wandb.Image(fig)})
 
-
-  def _report_trial(self, metric, epoch_id) -> None:
-    """Report the trial results to Optuna."""
-    self.trial.report(metric, step=epoch_id)
-    if self.trial.should_prune():
-            raise optuna.exceptions.TrialPruned()
   @property
   def learn_rescaling(self) -> bool:
     """Whether to learn at least one rescaling factor."""
