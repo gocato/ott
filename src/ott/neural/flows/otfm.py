@@ -299,7 +299,8 @@ class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
                         state_xi=self.state_xi,
                 )
             if step % self.valid_freq == 0 and step != 0:
-                self._valid_step(valid_loader, step)
+                if self.metrics_callback is not None:
+                    self._valid_step(valid_loader, step)
                 if self.checkpoint_manager is not None:
                     states_to_save = {
                         "state_velocity_field": self.state_velocity_field

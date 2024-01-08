@@ -252,6 +252,7 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
     """Train GENOT."""
     batch: Dict[str, jnp.array] = {}
     tbar = trange(self.iterations, leave=True)
+    curr_loss = 0.0
     for iteration in tbar:
       batch = next(train_loader)
 
@@ -327,6 +328,8 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
           rng_step_fn, self.state_velocity_field, batch
       )
       tbar.set_postfix({"loss": loss}, refresh=True)
+      curr_loss += loss
+      
       if self.learn_rescaling:
         (
             self.state_eta, self.state_xi, eta_predictions, xi_predictions,
@@ -341,7 +344,8 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
             state_xi=self.state_xi,
         )
       if iteration % self.valid_freq == 0 and iteration != 0:
-        self._valid_step(valid_loader, iteration)
+        if self.metrics_callback is not None:
+          self._valid_step(valid_loader, iteration)
         if self.checkpoint_manager is not None:
           states_to_save = {"state_velocity_field": self.state_velocity_field}
           if self.state_eta is not None:
@@ -349,6 +353,15 @@ class GENOT(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
           if self.state_xi is not None:
             states_to_save["state_xi"] = self.state_xi
           self.checkpoint_manager.save(iteration, states_to_save)
+        if self.log_training:
+          wandb.log(
+            {
+              "curr_loss": curr_loss / self.valid_freq,
+              "loss": loss
+            },
+            iteration
+          )
+        curr_loss = 0.0
 
   def _get_step_fn(self) -> Callable:
 
