@@ -57,10 +57,7 @@ __all__ = ["OTFlowMatching"]
 
 class OTFlowMatching(UnbalancednessMixin, ResampleMixin, BaseNeuralSolver):
     """(Optimal transport) flow matching class.
-    """(Optimal transport) flow matching class.
 
-    Flow matching as introduced in :cite:`lipman:22`, with extension to OT-FM
-    (:cite`tong:23`, :cite:`pooladian:23`).
     Flow matching as introduced in :cite:`lipman:22`, with extension to OT-FM
     (:cite`tong:23`, :cite:`pooladian:23`).
 
