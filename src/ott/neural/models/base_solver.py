@@ -80,7 +80,12 @@ class ResampleMixin:
   ) -> Tuple[jnp.ndarray, ...]:
     """Resample a batch according to coupling `tmat`."""
     tmat_flattened = tmat.flatten()
-    indices = jax.random.choice(key, len(tmat_flattened), shape=[tmat.shape[0]])
+    indices = jax.random.choice(
+      key,
+      len(tmat_flattened),
+      shape=[tmat.shape[0]],
+      p=tmat_flattened
+    )
     indices_source = indices // tmat.shape[1]
     indices_target = indices % tmat.shape[1]
     return tuple(
